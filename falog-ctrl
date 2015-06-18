@@ -1,0 +1,20 @@
+#!/bin/bash
+
+case "$1" in
+
+"reset")
+	echo "$1" > /tmp/falog-ctrl
+	;;
+
+"filter")
+	echo "$1 $2" > /tmp/falog-ctrl
+	;;
+
+"print")
+	echo "$1" > /tmp/falog-ctrl
+	cat /tmp/falog-out
+	;;
+"quit")
+	echo "$1" > /tmp/falog-ctrl
+	;;
+esac
