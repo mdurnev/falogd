@@ -202,9 +202,14 @@ int main(void)
 
             /* check for the reset command */
             if (!strcmp(str, "reset")) {
+                adjust_fanotify(FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_CLOSE | FAN_ONDIR, kmsg_fd);
+                fanotify_filter_clean();
+
+                suspend_proc_event_listener();
                 free_proclist();
                 init_proclist(kmsg_fd);
-                fanotify_filter_clean();
+                release_proc_event_listener();
+
                 fs_tree_free();
             }
 
@@ -222,8 +227,25 @@ int main(void)
             }
 
             /* check for the filter command */
-            if (!strncmp(str, "filter ", 7)) {
+            else if (!strncmp(str, "filter ", 7)) {
                 fanotify_filter_add(str + 7, kmsg_fd);
+            }
+
+            /* check for the events command */
+            else if (!strncmp(str, "events ", 7)) {
+                unsigned int fa_events = 0;
+                if (strchr(str + 7, 'R'))
+                    fa_events |= FAN_ACCESS;
+                if (strchr(str + 7, 'W'))
+                    fa_events |= FAN_MODIFY;
+                if (strchr(str + 7, 'O'))
+                    fa_events |= FAN_OPEN;
+                if (strchr(str + 7, 'C'))
+                    fa_events |= FAN_CLOSE;
+                if (strchr(str + 7, 'D'))
+                    fa_events |= FAN_ONDIR;
+
+                adjust_fanotify(fa_events, kmsg_fd);
             }
 
             else {

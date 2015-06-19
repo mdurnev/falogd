@@ -6,6 +6,10 @@ case "$1" in
 	echo "$1" > /tmp/falog-ctrl
 	;;
 
+"events")
+	echo "$1 $2" > /tmp/falog-ctrl
+	;;
+
 "filter")
 	echo "$1 $2" > /tmp/falog-ctrl
 	;;

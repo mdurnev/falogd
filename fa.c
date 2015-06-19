@@ -73,6 +73,9 @@ static char* path_filter[64];
 static unsigned int path_filter_len = 0;
 static pthread_mutex_t path_filter_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static unsigned int fa_events = FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_CLOSE | FAN_ONDIR;
+static pthread_mutex_t fa_events_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 /**************************************************************************************************
 * Clean up file system tree
@@ -362,6 +365,8 @@ int init_fanotify(int log_fd)
         return 0;
     }
 
+    pthread_mutex_lock(&fa_events_mutex);
+
     while ((mount = getmntent(mounts)) != NULL) {
         /* Only consider mounts which have an actual device or bind mount
          * point. The others are stuff like proc, sysfs, binfmt_misc etc. which
@@ -372,17 +377,68 @@ int init_fanotify(int log_fd)
         }
 
         int rc = fanotify_mark(fan_fd, FAN_MARK_ADD | FAN_MARK_MOUNT,
-                            FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_CLOSE | FAN_ONDIR | FAN_EVENT_ON_CHILD,
+                            fa_events | FAN_EVENT_ON_CHILD,
                             AT_FDCWD, mount->mnt_dir);
         if (rc < 0) {
             log_error("Failed to add watch for mount ", mount->mnt_dir, errno, log_fd);
         }
     }
 
+    pthread_mutex_unlock(&fa_events_mutex);
+
     endmntent(mounts);
     return 1;
 }
 
+/**************************************************************************************************
+* Adjust fanotify
+**************************************************************************************************/
+int adjust_fanotify(unsigned int new_fa_events, int log_fd)
+{
+    FILE* mounts;
+    struct mntent* mount;
+
+    /* iterate over all mounts */
+    mounts = setmntent("/proc/self/mounts", "r");
+    if (mounts == NULL) {
+        log_error("Failed to list mounts ", "", errno, log_fd);
+        return 0;
+    }
+
+    pthread_mutex_lock(&fa_events_mutex);
+
+    unsigned int add_events = (fa_events ^ new_fa_events) & new_fa_events;
+    unsigned int rm_events  = (fa_events ^ new_fa_events) & fa_events;
+
+    fa_events = new_fa_events;
+
+    while ((mount = getmntent(mounts)) != NULL) {
+        if (mount->mnt_fsname == NULL || access(mount->mnt_fsname, F_OK) != 0
+            || strchr(mount->mnt_fsname, '/') == NULL) {
+            continue;
+        }
+
+        if (add_events) {
+            int rc = fanotify_mark(fan_fd, FAN_MARK_ADD | FAN_MARK_MOUNT,
+                                   add_events,
+                                   AT_FDCWD, mount->mnt_dir);
+            if (rc < 0) {
+                log_error("Failed to add watch for mount ", mount->mnt_dir, errno, log_fd);
+            }
+        }
+
+        if (rm_events) {
+            int rc = fanotify_mark(fan_fd, FAN_MARK_REMOVE | FAN_MARK_MOUNT,
+                                   rm_events,
+                                   AT_FDCWD, mount->mnt_dir);
+            if (rc < 0) {
+                log_error("Failed to remove watch for mount ", mount->mnt_dir, errno, log_fd);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&fa_events_mutex);
+}
 
 /**************************************************************************************************
 * Add file path filtering string
