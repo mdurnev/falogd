@@ -26,7 +26,6 @@
 #include <unistd.h>
 #include <limits.h>
 #include <string.h>
-#include <libudev.h>
 #if HAVE_SYSTEMD
 #include <systemd/sd-daemon.h>
 #endif
