@@ -580,5 +580,9 @@ int stop_fanotify_event_listener(int log_fd)
         return 0;
     }
 
+    /* Unlock mutexes in case they were left locked after the thread was cancelled */
+    pthread_mutex_unlock(&path_filter_mutex);
+    pthread_mutex_unlock(&fs_tree_mutex);
+
     return 1;
 }

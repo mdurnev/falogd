@@ -49,7 +49,6 @@ static struct procid* proclist = NULL;
 static pthread_mutex_t proclist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_t event_listener_thread;
-static pthread_mutex_t proc_event_listener_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct __attribute__ ((aligned(NLMSG_ALIGNTO))) netlink_msg {
     struct nlmsghdr nl_hdr;
@@ -372,10 +371,6 @@ static void* proc_event_listener(void* data)
         }
 
         pthread_testcancel();
-
-        /* check if the listnener is suspended */
-        pthread_mutex_lock(&proc_event_listener_mutex);
-        pthread_mutex_unlock(&proc_event_listener_mutex);
     }
 
     pthread_exit(NULL);
@@ -458,6 +453,9 @@ int stop_proc_event_listener(int log_fd)
         return 0;
     }
 
+    /* Unlock proclist_mutex in case it was left locked after the thread was cancelled */
+    pthread_mutex_unlock(&proclist_mutex);
+
     /* Unsubscribe */
     struct netlink_msg msg;
     memset(&msg, 0, sizeof(msg));
@@ -479,20 +477,4 @@ int stop_proc_event_listener(int log_fd)
 
     close(netlink_socket);
     return 1;
-}
-
-/**************************************************************************************************
-* Suspend proc event listener thread
-**************************************************************************************************/
-void suspend_proc_event_listener()
-{
-    pthread_mutex_lock(&proc_event_listener_mutex);
-}
-
-/**************************************************************************************************
-* Release proc event listener thread
-**************************************************************************************************/
-void release_proc_event_listener()
-{
-    pthread_mutex_unlock(&proc_event_listener_mutex);
 }

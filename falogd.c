@@ -204,10 +204,10 @@ int main(void)
                 adjust_fanotify(FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_CLOSE | FAN_ONDIR, kmsg_fd);
                 fanotify_filter_clean();
 
-                suspend_proc_event_listener();
+                stop_proc_event_listener(kmsg_fd);
                 free_proclist();
                 init_proclist(kmsg_fd);
-                release_proc_event_listener();
+                start_proc_event_listener(kmsg_fd);
 
                 fs_tree_free();
             }
