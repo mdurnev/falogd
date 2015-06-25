@@ -1,4 +1,4 @@
-CFLAGS ?= -pthread -O2 -DHAVE_SYSTEMD=0
+CFLAGS ?= -g -pthread -O2 -DHAVE_SYSTEMD=0
 LDFLAGS ?= -pthread -Wl,--hash-style=gnu
 
 all: falogd
