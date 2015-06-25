@@ -284,7 +284,7 @@ int print_pid_subtree(pid_t pid, char* printbuf, int printbuf_size, int log_fd)
     int l;
     static char errbuf[128];
 
-    pthread_mutex_unlock(&proclist_mutex);
+    pthread_mutex_lock(&proclist_mutex);
 
     struct procid* p = proclist;
     while (p) {
