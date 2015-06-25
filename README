@@ -1,1 +1,42 @@
 falogd - Log system wide file access events
+
+
+Log Format
+----------
+
+process_name(pid<parent_pid<parent_parent_pid<...<1): access path
+
+For example:
+test(19069<19060<3749<3747<3689<3682<1): RCO /bin/bash
+falog-ctrl(19067<19060<3749<3747<3689<3682<1): RCO /bin/bash
+
+All Process IDs are unique in the log. Reused PIDs are loged as: PID + (reuse_count << 16).
+So the following IDs belong to different processes with the same PID: 19069, 84605, 150141, 
+215677, 281213, ...
+ID uniqueness is broken if reuse count is 65536 or greater.
+
+
+Examples
+--------
+
+# Start the daemon
+sudo ./falogd
+
+# Log only file read events (default is "ORWCD", i.e. open, read, write and close 
+# events for files and directories)
+./falog-ctrl events "R"
+
+# Log only access to files which path contains "sysroots/mx6q" or "/temp/run.do_"
+# and does not contain "foo"
+./falog-ctrl filter "sysroots/mx6q"
+./falog-ctrl filter "/temp/run.do_"
+./falog-ctrl filter "!foo"
+
+# Save log to a file
+./falog-ctrl print > log.txt
+
+# Clean up all logs and filters
+./falog-ctrl reset
+
+# Stop the daemon
+./falog-ctrl quit
