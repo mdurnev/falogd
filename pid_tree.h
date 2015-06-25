@@ -19,7 +19,7 @@ int add_procid(pid_t pid, pid_t ppid, int log_fd);
 /**************************************************************************************************
 * Print pid<ppid<pppid<...
 **************************************************************************************************/
-int print_pid_subtree(pid_t pid, char* printbuf, int printbuf_size, int log_fd);
+int print_pid_subtree(pid_t pid, time_t t, char* printbuf, int printbuf_size, int log_fd);
 
 /**************************************************************************************************
 * Start proc event listeren thread
@@ -30,5 +30,10 @@ int start_proc_event_listener(int log_fd);
 * Stop proc event listeren thread
 **************************************************************************************************/
 int stop_proc_event_listener(int log_fd);
+
+/**************************************************************************************************
+* Check if two file access events can be done by the same process
+**************************************************************************************************/
+int is_same_pid(pid_t pid, time_t t1, time_t t2);
 
 #endif

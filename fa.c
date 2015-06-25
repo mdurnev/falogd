@@ -34,6 +34,7 @@
 #include <sys/fanotify.h>
 #include <sys/time.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "log.h"
 #include "pid_tree.h"
@@ -49,6 +50,7 @@
 struct access_node
 {
     pid_t               pid;      /* process id */
+    time_t              time;     /* access time (when notification was received) */
     int                 access;   /* access code */
     struct access_node* next;
 };
@@ -173,8 +175,8 @@ int fs_tree_add_file(char* path, pid_t pid, int access)
         if (!tree->size || !tree->child) {
             tree->child = (struct fs_node**)malloc(64 * sizeof(struct fs_node*));
             if (!tree->child) {
-                pthread_mutex_unlock(&fs_tree_mutex);
                 tree->size = 0;
+                pthread_mutex_unlock(&fs_tree_mutex);
                 return 0;
             }
             tree->size = 64;
@@ -237,33 +239,18 @@ int fs_tree_add_file(char* path, pid_t pid, int access)
         else {
             path = NULL;
 
-            /* search pid in the access list */
-            found = 0;
-            struct access_node* p = tree->child[i]->access_list;
-
-            while (p) {
-                if (p->pid == pid) {
-                    p->access |= access;
-                    found = 1;
-                    break;
-                }
-
-                p = p->next;
-            }
-
             /* add new access node */
-            if (!found) {
-                struct access_node* p = (struct access_node*)malloc(sizeof(struct access_node));
-                if (!p) {
-                    pthread_mutex_unlock(&fs_tree_mutex);
-                    return 0;
-                }
-
-                p->pid = pid;
-                p->access = access;
-                p->next = tree->child[i]->access_list;
-                tree->child[i]->access_list = p;
+            struct access_node* p = (struct access_node*)malloc(sizeof(struct access_node));
+            if (!p) {
+                pthread_mutex_unlock(&fs_tree_mutex);
+                return 0;
             }
+
+            p->pid = pid;
+            time(&p->time);
+            p->access = access;
+            p->next = tree->child[i]->access_list;
+            tree->child[i]->access_list = p;
         }
     }
 
@@ -279,11 +266,24 @@ static void print_fs_tree(struct fs_node* tree, char* path, int out_fd, int log_
     if (tree) {
         struct access_node* p = tree->access_list;
         while (p) {
+            /* check if we can merge access nodes with the same pid */
+            struct access_node* p1 = p;
+            while (p1 && p1->next) {
+                if (p->pid == p1->next->pid && is_same_pid(p->pid, p->time, p1->next->time)) {
+                    p->access |= p1->next->access;
+                    struct access_node* next = p1->next->next;
+                    free(p1->next);
+                    p1->next = next;
+                }
+                else
+                    p1 = p1->next;
+            }
+
             if (p->access) {
                 static char buf[1024];
 
                 /* print "procname(pid<ppid<pppid<...<1): "*/
-                print_pid_subtree(p->pid, buf, 1010, log_fd);
+                print_pid_subtree(p->pid, p->time, buf, 1010, log_fd);
 
                 /* convert access code to string */
                 int n = strlen(buf);

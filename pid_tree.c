@@ -32,17 +32,24 @@
 #include <linux/netlink.h>
 #include <linux/connector.h>
 #include <linux/cn_proc.h>
+#include <time.h>
 
 #include "log.h"
 #include "pid_tree.h"
 
+/* assume that new process with the same pid will not be created within this time */
+#define PID_NO_REUSE_TIME 10
+
 struct procid
 {
-    pid_t pid;
-    pid_t ppid;
-    char* name;
-    struct procid* parent;
-    struct procid* next;
+    pid_t          pid;
+    time_t         time;        /* time when the process was started (notification received) */
+    pid_t          ppid;        /* ppid is used in init_proclist() only */
+    char*          name;
+    struct procid* parent;      /* the parent process */
+    struct procid* next;        /* next process in the list (previous in the time line) */
+    struct procid* same_pid;    /* previous process with the same pid */
+    int            reuse_count; /* pid reuse count */
 };
 
 static struct procid* proclist = NULL;
@@ -97,11 +104,14 @@ int init_proclist(int log_fd)
         }
 
         p->pid = pid;
+        time(&p->time);
         p->name = NULL;
         p->next = proclist;
         proclist = p;
         p->ppid = 0;
         p->parent = NULL;
+        p->same_pid = NULL;
+        p->reuse_count = 0;
 
         /* get ppid */
         int fd;
@@ -211,22 +221,31 @@ void free_proclist()
 **************************************************************************************************/
 int add_procid(pid_t pid, pid_t ppid, int log_fd)
 {
+    time_t t;
+    time(&t);
+
     pthread_mutex_lock(&proclist_mutex);
 
+    /* search for parent process */
     struct procid* p = proclist;
     struct procid* parent = NULL;
     while (p) {
         if (p->pid == ppid) {
             parent = p;
+            break;
         }
-        else if (p->pid == pid) {
-            if (p->ppid == ppid) {
-                pthread_mutex_unlock(&proclist_mutex);
-                return 1;
-            }
-            else {
-                log_error("Internal error in ", "add_procid()", 0, log_fd);
-            }
+        p = p->next;
+    }
+
+    /* search for previous process with the same pid */
+    p = proclist;
+    struct procid* prev = NULL;
+    int reuse_count = 0;
+    while (p) {
+        if (p->pid == pid) {
+            prev = p;
+            reuse_count = p->reuse_count + 1;
+            break;
         }
         p = p->next;
     }
@@ -239,9 +258,12 @@ int add_procid(pid_t pid, pid_t ppid, int log_fd)
     }
 
     p->pid = pid;
+    p->time = t;
     p->name = NULL;
     p->ppid = ppid;
     p->parent = parent;
+    p->same_pid = prev;
+    p->reuse_count = reuse_count;
     p->next = proclist;
     proclist = p;
 
@@ -276,15 +298,64 @@ int add_procid(pid_t pid, pid_t ppid, int log_fd)
 }
 
 /**************************************************************************************************
+* Check if two file access events can be done by the same process
+**************************************************************************************************/
+int is_same_pid(pid_t pid, time_t t1, time_t t2)
+{
+    static struct procid* p = NULL;
+
+    pthread_mutex_lock(&proclist_mutex);
+
+    /* search for pid */
+    if (!p || p->pid != pid) {
+        p = proclist;
+        while (p) {
+            if (p->pid == pid) {
+                break;
+            }
+            p = p->next;
+        }
+        if (p->pid != pid) {
+            /* pid not found */
+            pthread_mutex_unlock(&proclist_mutex);
+            return 0;
+        }
+    }
+
+    struct procid* p1 = p;
+    while (p1->same_pid) {
+        /* events about new process and file access are received asynchronously */
+        /* let's assume that processes with the same pid are not created within PID_NO_REUSE_TIME seconds */
+        if (t1 + PID_NO_REUSE_TIME < p1->time)
+            p1 = p1->same_pid;
+        else
+            break;
+    }
+
+    struct procid* p2 = p;
+    while (p2->same_pid) {
+        if (t2 + PID_NO_REUSE_TIME < p2->time)
+            p2 = p2->same_pid;
+        else 
+            break;
+    }
+
+    pthread_mutex_unlock(&proclist_mutex);
+
+    return (p1 == p2);
+}
+
+/**************************************************************************************************
 * Print pid<ppid<pppid<...
 **************************************************************************************************/
-int print_pid_subtree(pid_t pid, char* printbuf, int printbuf_size, int log_fd)
+int print_pid_subtree(pid_t pid, time_t t, char* printbuf, int printbuf_size, int log_fd)
 {
     int l;
     static char errbuf[128];
 
     pthread_mutex_lock(&proclist_mutex);
 
+    /* search for pid */
     struct procid* p = proclist;
     while (p) {
         if (p->pid == pid) {
@@ -294,21 +365,36 @@ int print_pid_subtree(pid_t pid, char* printbuf, int printbuf_size, int log_fd)
     }
 
     if (p->pid != pid) {
-        snprintf(errbuf, 128, "Failed to find pid for %i.\n", (int)pid);
+        snprintf(errbuf, 128, "Failed to find pid for %i", (int)pid);
         log_error(errbuf, "", 0, log_fd);
         pthread_mutex_unlock(&proclist_mutex);
         snprintf(printbuf, printbuf_size, "unknown(%i)", pid);
         return 0;
     }
 
-    snprintf(printbuf, printbuf_size, "%s(%i", p->name, pid);
+    /* which of the processes with the same pid? */
+    while (p->same_pid) {
+        /* events about new process and file access are received asynchronously */
+        /* let's assume that processes with the same pid are not created within PID_NO_REUSE_TIME seconds */
+        if (t + PID_NO_REUSE_TIME < p->time)
+            p = p->same_pid;
+        else {
+            if (t < p->time) {
+                snprintf(errbuf, 128, "WARNING: File access before pid received for %i", (int)pid);
+                log_error(errbuf, "", 0, log_fd);
+            }
+            break;
+        }
+    }
+
+    snprintf(printbuf, printbuf_size, "%s(%i", p->name, pid + (p->reuse_count << 16));
 
     while (p->parent && p->parent->pid)
     {
         l = strlen(printbuf);
         printbuf = printbuf + l;
         printbuf_size -= l;
-        snprintf(printbuf, printbuf_size, "<%i", p->parent->pid);
+        snprintf(printbuf, printbuf_size, "<%i", p->parent->pid + (p->parent->reuse_count << 16));
         p = p->parent;
     }
     pthread_mutex_unlock(&proclist_mutex);
@@ -319,7 +405,7 @@ int print_pid_subtree(pid_t pid, char* printbuf, int printbuf_size, int log_fd)
     snprintf(printbuf, printbuf_size, "): ", p->name, pid);
 
     if (p->pid != 1) {
-        snprintf(errbuf, 128, "Failed to find pid of the parent process for %i.\n", (int)p->pid);
+        snprintf(errbuf, 128, "Failed to find pid of the parent process for %i", (int)p->pid);
         log_error(errbuf, "", 0, log_fd);
         return 0;
     }
