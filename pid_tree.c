@@ -44,16 +44,15 @@ struct procid
 {
     pid_t          pid;
     time_t         time;        /* time when the process was started (notification received) */
-    pid_t          ppid;        /* ppid is used in init_proclist() only */
     char*          name;
     struct procid* parent;      /* the parent process */
-    struct procid* next;        /* next process in the list (previous in the time line) */
     struct procid* same_pid;    /* previous process with the same pid */
     int            reuse_count; /* pid reuse count */
 };
 
-static struct procid* proclist = NULL;
-static pthread_mutex_t proclist_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int pid_max = 0; /* size of proctable */
+static struct procid** proctable = NULL;
+static pthread_mutex_t proctable_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_t event_listener_thread;
 
@@ -72,18 +71,56 @@ int netlink_socket = 0;
 
 
 /**************************************************************************************************
-* Init pid tree (proclist)
+* Init pid tree (proctable)
 **************************************************************************************************/
-int init_proclist(int log_fd)
+int init_proctable(int log_fd)
 {
-    pthread_mutex_lock(&proclist_mutex);
+    pthread_mutex_lock(&proctable_mutex);
+
+    proctable = NULL;
+
+    /* Allocate memory for the proc table*/
+    int pid_max_fd = open("/proc/sys/kernel/pid_max", O_RDONLY);
+    if (pid_max_fd < 0) {
+         log_error("Can't open for reading: ", "/proc/sys/kernel/pid_max", errno, log_fd);
+         pthread_mutex_unlock(&proctable_mutex);
+         return 0;
+    }
+
+    static char pid_max_buf[100];
+    int pid_max_len = read(pid_max_fd, pid_max_buf, sizeof(pid_max_buf - 1));
+    if (pid_max_len > 0) {
+        close(pid_max_fd);
+        pid_max_buf[pid_max_len] = '\0';
+    }
+    else {
+         log_error("Can't read: ", "/proc/sys/kernel/pid_max", errno, log_fd);
+         close(pid_max_fd);
+         pthread_mutex_unlock(&proctable_mutex);
+         return 0;
+    }
+
+    pid_max = atoi(pid_max_buf);
+    if (pid_max < 0 || pid_max > 65536) {
+         log_error("Can't get valid max pid from value ", pid_max_buf, 0, log_fd);
+         pthread_mutex_unlock(&proctable_mutex);
+         return 0;
+    }
+
+    proctable = (struct procid**)malloc(pid_max * sizeof(struct procid*));
+    if (!proctable) {
+        log_error("Can't allocate memory for proctable", "", 0, log_fd);
+        pthread_mutex_unlock(&proctable_mutex);
+        return 0;
+    }
+    memset(proctable, 0, pid_max * sizeof(struct procid*)); /* init with NULL pointers */
 
     /* scan /proc for process entries */
     DIR* dp;
     struct dirent* ent;
     if (!(dp = opendir("/proc"))) {
         log_error("Can't open for reading: ", "/proc", errno, log_fd);
-        pthread_mutex_unlock(&proclist_mutex);
+        pthread_mutex_unlock(&proctable_mutex);
         return 0;
     }
 
@@ -92,23 +129,26 @@ int init_proclist(int log_fd)
 
         /* skip non-process entries */
         if (ent->d_type != DT_DIR
-            || (pid = atol(ent->d_name)) <= 0)
+            || (pid = atol(ent->d_name)) <= 0
+            || pid >= pid_max)
             continue;
 
-        struct procid* p = (struct procid*)malloc(sizeof(struct procid));
+        struct procid* p = proctable[pid];
         if (!p) {
-            log_error("Can't allocate memory ", "", 0, log_fd);
-            closedir(dp);
-            pthread_mutex_unlock(&proclist_mutex);
-            return 0;
+            /* create new node only if it does not exist */
+            p = (struct procid*)malloc(sizeof(struct procid));
+            if (!p) {
+                log_error("Can't allocate memory ", "", 0, log_fd);
+                closedir(dp);
+                pthread_mutex_unlock(&proctable_mutex);
+                return 0;
+            }
+            proctable[pid] = p;
         }
 
         p->pid = pid;
         time(&p->time);
         p->name = NULL;
-        p->next = proclist;
-        proclist = p;
-        p->ppid = 0;
         p->parent = NULL;
         p->same_pid = NULL;
         p->reuse_count = 0;
@@ -138,13 +178,18 @@ int init_proclist(int log_fd)
         if (fd >= 0)
             close(fd);
 
+        pid_t ppid;
         char* d = data;
         while (d) {
             if (!strncmp(d, "PPid:", 5)) {
                 d += 5;
                 while (*d == ' ' || *d == '\t')
                     d++;
-                p->ppid = atol(d);
+                ppid = atol(d);
+                if (ppid < 0 || ppid >= pid_max) {
+                    /* this should never happen */
+                    ppid = 0;
+                }
 
                 break;
             }
@@ -152,6 +197,24 @@ int init_proclist(int log_fd)
             if (d)
                 d++;
         }
+
+        if (!proctable[ppid]) {
+            /* create an new node for parent pid */
+            proctable[ppid] = (struct procid*)malloc(sizeof(struct procid));
+            if (!proctable[ppid]) {
+                log_error("Can't allocate memory ", "", 0, log_fd);
+                closedir(dp);
+                pthread_mutex_unlock(&proctable_mutex);
+                return 0;
+            }
+            proctable[ppid]->pid = ppid;
+            time(&proctable[ppid]->time);
+            proctable[ppid]->name = NULL;
+            proctable[ppid]->parent = NULL;
+            proctable[ppid]->same_pid = NULL;
+            proctable[ppid]->reuse_count = 0;
+        }
+        p->parent = proctable[ppid];
 
         /* get name */
         static char procname[100];
@@ -168,7 +231,8 @@ int init_proclist(int log_fd)
             if (len > 0) {
                 procname[len] = '\0';
                 p->name = (char*)malloc(strlen(procname) + 1);
-                strcpy(p->name, procname);
+                if (p->name)
+                    strcpy(p->name, procname);
             }
 
             close(fd);
@@ -176,96 +240,69 @@ int init_proclist(int log_fd)
     }
     closedir(dp);
 
-    /* set links */
-    struct procid* p = proclist;
-    while (p) {
-        struct procid* pp = proclist;
-        while (pp) {
-            if (p->ppid == pp->pid) {
-                p->parent = pp;
-                break;
-            }
-            pp = pp->next;
-        }
-        p = p->next;
-    }
-
-    pthread_mutex_unlock(&proclist_mutex);
+    pthread_mutex_unlock(&proctable_mutex);
     return 1;
 }
 
 
 /**************************************************************************************************
-* Remove pid tree (proclist)
+* Remove pid tree (proctable)
 **************************************************************************************************/
-void free_proclist()
+void free_proctable()
 {
-    pthread_mutex_lock(&proclist_mutex);
+    pthread_mutex_lock(&proctable_mutex);
 
-    struct procid* p = proclist;
-    while (p) {
-        struct procid* pp = p;
-        p = p->next;
-        if (pp->name)
-            free(pp->name);
-        free(pp);
+    int i;
+    for (i = 0; i < pid_max; i++) {
+        struct procid* p = proctable[i];
+        while (p) {
+            struct procid* pp = p;
+            p = p->same_pid;
+            if (pp->name)
+                free(pp->name);
+            free(pp);
+        }
     }
 
-    proclist = NULL;
+    free(proctable);
+    proctable = NULL;
 
-    pthread_mutex_unlock(&proclist_mutex);
+    pthread_mutex_unlock(&proctable_mutex);
 }
 
 /**************************************************************************************************
-* Add pid to the pid tree (proclist)
+* Add pid to the pid tree (proctable)
 **************************************************************************************************/
 int add_procid(pid_t pid, pid_t ppid, int log_fd)
 {
     time_t t;
     time(&t);
 
-    pthread_mutex_lock(&proclist_mutex);
-
-    /* search for parent process */
-    struct procid* p = proclist;
-    struct procid* parent = NULL;
-    while (p) {
-        if (p->pid == ppid) {
-            parent = p;
-            break;
-        }
-        p = p->next;
+    if (pid < 0 || pid >= pid_max
+        || ppid < 0 || ppid >= pid_max) {
+        static char buf [100];
+        snprintf(buf, sizeof(buf), "pid=%d, ppid=%d", (int)pid, (int)ppid);
+        log_error("Incorrect pid or ppid: ", buf, 0, log_fd);
+        return 0;
     }
 
-    /* search for previous process with the same pid */
-    p = proclist;
-    struct procid* prev = NULL;
-    int reuse_count = 0;
-    while (p) {
-        if (p->pid == pid) {
-            prev = p;
-            reuse_count = p->reuse_count + 1;
-            break;
-        }
-        p = p->next;
-    }
+    pthread_mutex_lock(&proctable_mutex);
 
-    p = (struct procid*)malloc(sizeof(struct procid));
+    struct procid* p = (struct procid*)malloc(sizeof(struct procid));
     if (!p) {
         log_error("Can't allocate memory ", "", 0, log_fd);
-        pthread_mutex_unlock(&proclist_mutex);
+        pthread_mutex_unlock(&proctable_mutex);
         return 0;
     }
 
     p->pid = pid;
     p->time = t;
     p->name = NULL;
-    p->ppid = ppid;
-    p->parent = parent;
-    p->same_pid = prev;
-    p->reuse_count = reuse_count;
-    p->next = proclist;
-    proclist = p;
+    p->parent = proctable[ppid];
+    p->same_pid = proctable[pid];
+    p->reuse_count = proctable[pid] ? proctable[pid]->reuse_count + 1 : 0;
+
+    proctable[pid] = p;
 
     /* get name */
     int fd;
@@ -286,13 +323,14 @@ int add_procid(pid_t pid, pid_t ppid, int log_fd)
         if (len > 0) {
             procname[len] = '\0';
             p->name = (char*)malloc(strlen(procname) + 1);
-            strcpy(p->name, procname);
+            if (p->name)
+                strcpy(p->name, procname);
         }
 
         close(fd);
     }
 
-    pthread_mutex_unlock(&proclist_mutex);
+    pthread_mutex_unlock(&proctable_mutex);
 
     return 1;
 }
@@ -302,27 +340,15 @@ int add_procid(pid_t pid, pid_t ppid, int log_fd)
 **************************************************************************************************/
 int is_same_pid(pid_t pid, time_t t1, time_t t2)
 {
-    static struct procid* p = NULL;
+    pthread_mutex_lock(&proctable_mutex);
 
-    pthread_mutex_lock(&proclist_mutex);
-
-    /* search for pid */
-    if (!p || p->pid != pid) {
-        p = proclist;
-        while (p) {
-            if (p->pid == pid) {
-                break;
-            }
-            p = p->next;
-        }
-        if (p->pid != pid) {
-            /* pid not found */
-            pthread_mutex_unlock(&proclist_mutex);
-            return 0;
-        }
+    if (!proctable[pid]) {
+        /* pid not found */
+        pthread_mutex_unlock(&proctable_mutex);
+        return 0;
     }
 
-    struct procid* p1 = p;
+    struct procid* p1 = proctable[pid];
     while (p1->same_pid) {
         /* events about new process and file access are received asynchronously */
         /* let's assume that processes with the same pid are not created within PID_NO_REUSE_TIME seconds */
@@ -332,7 +358,7 @@ int is_same_pid(pid_t pid, time_t t1, time_t t2)
             break;
     }
 
-    struct procid* p2 = p;
+    struct procid* p2 = proctable[pid];
     while (p2->same_pid) {
         if (t2 + PID_NO_REUSE_TIME < p2->time)
             p2 = p2->same_pid;
@@ -340,7 +366,7 @@ int is_same_pid(pid_t pid, time_t t1, time_t t2)
             break;
     }
 
-    pthread_mutex_unlock(&proclist_mutex);
+    pthread_mutex_unlock(&proctable_mutex);
 
     return (p1 == p2);
 }
@@ -353,22 +379,15 @@ int print_pid_subtree(pid_t pid, time_t t, char* printbuf, int printbuf_size, in
     int l;
     static char errbuf[128];
 
-    pthread_mutex_lock(&proclist_mutex);
+    pthread_mutex_lock(&proctable_mutex);
 
-    /* search for pid */
-    struct procid* p = proclist;
-    while (p) {
-        if (p->pid == pid) {
-            break;
-        }
-        p = p->next;
-    }
+    struct procid* p = proctable[pid];
 
-    if (p->pid != pid) {
+    if (!p) {
         snprintf(errbuf, 128, "Failed to find pid for %i", (int)pid);
         log_error(errbuf, "", 0, log_fd);
-        pthread_mutex_unlock(&proclist_mutex);
-        snprintf(printbuf, printbuf_size, "unknown(%i)", pid);
+        pthread_mutex_unlock(&proctable_mutex);
+        snprintf(printbuf, printbuf_size, "unknown(%i): ", pid);
         return 0;
     }
 
@@ -397,18 +416,20 @@ int print_pid_subtree(pid_t pid, time_t t, char* printbuf, int printbuf_size, in
         snprintf(printbuf, printbuf_size, "<%i", p->parent->pid + (p->parent->reuse_count << 16));
         p = p->parent;
     }
-    pthread_mutex_unlock(&proclist_mutex);
 
     l = strlen(printbuf);
     printbuf = printbuf + l;
     printbuf_size -= l;
-    snprintf(printbuf, printbuf_size, "): ", p->name, pid);
+    snprintf(printbuf, printbuf_size, "): ");
 
     if (p->pid != 1) {
         snprintf(errbuf, 128, "Failed to find pid of the parent process for %i", (int)p->pid);
         log_error(errbuf, "", 0, log_fd);
+        pthread_mutex_unlock(&proctable_mutex);
         return 0;
     }
+
+    pthread_mutex_unlock(&proctable_mutex);
 
     return 1;
 }
@@ -441,11 +462,6 @@ static void* proc_event_listener(void* data)
                 add_procid(msg.proc_ev.event_data.fork.child_pid, 
                            msg.proc_ev.event_data.fork.parent_pid,
                            log_fd);
-                //{
-                //    char sss[1024];
-                //    snprintf(sss, 1024, "ppid=%d, pid=%d ", (int)msg.proc_ev.event_data.fork.parent_pid, (int)msg.proc_ev.event_data.fork.child_pid);
-                //    log_error(sss, "", 0, log_fd);
-                //}
                 break;
             case PROC_EVENT_NONE:
             case PROC_EVENT_EXEC:
@@ -539,8 +555,8 @@ int stop_proc_event_listener(int log_fd)
         return 0;
     }
 
-    /* Unlock proclist_mutex in case it was left locked after the thread was cancelled */
-    pthread_mutex_unlock(&proclist_mutex);
+    /* Unlock proctable_mutex in case it was left locked after the thread was cancelled */
+    pthread_mutex_unlock(&proctable_mutex);
 
     /* Unsubscribe */
     struct netlink_msg msg;

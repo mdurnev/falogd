@@ -125,13 +125,13 @@ int main(void)
     }
 
     /* Initialize storage to process ids */
-    if (!init_proclist(kmsg_fd) || !start_proc_event_listener(kmsg_fd)) {
+    if (!init_proctable(kmsg_fd) || !start_proc_event_listener(kmsg_fd)) {
         exit(EXIT_FAILURE);
     }
 
     /* Initialize fanotify */
     if (!init_fanotify(kmsg_fd) || !start_fanotify_event_listener(kmsg_fd)) {
-        free_proclist();
+        free_proctable();
         exit(EXIT_FAILURE);
     }
 
@@ -189,7 +189,7 @@ int main(void)
                 fs_tree_free();
 
                 stop_proc_event_listener(kmsg_fd);
-                free_proclist();
+                free_proctable();
 
                 /* remove pipes and exit */
                 remove(CONTROL_PIPE);
@@ -205,8 +205,8 @@ int main(void)
                 fanotify_filter_clean();
 
                 stop_proc_event_listener(kmsg_fd);
-                free_proclist();
-                init_proclist(kmsg_fd);
+                free_proctable();
+                init_proctable(kmsg_fd);
                 start_proc_event_listener(kmsg_fd);
 
                 fs_tree_free();
