@@ -302,7 +302,7 @@ static void print_fs_tree(struct fs_node* tree, char* path, int out_fd, int log_
                 static char str[PATH_MAX + 1024];
                 snprintf(str, PATH_MAX + 1024, "%s %s%s\n", buf, path, tree->name);
                 int len = strlen(str);
-                if (len != write(out_fd, str, strlen(str))) {
+                if (len != write(out_fd, str, len)) {
                     log_error("Failed to write ", "", errno, log_fd);
                 }
             }

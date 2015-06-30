@@ -53,7 +53,7 @@ int create_pipe(const char* pipename, mode_t access, int log_fd)
     if (st != 0 && errno == EEXIST) {
         /* A file with this name already exists. We have to make sure it's a pipe */
         struct stat sb;
-        if (stat(CONTROL_PIPE, &sb) == -1) {
+        if (stat(pipename, &sb) == -1) {
             log_error("Can't stat ", pipename, errno, log_fd);
             return 0;
         }
@@ -95,7 +95,7 @@ int main(void)
     /* Open logs */        
     int kmsg_fd = open("/dev/kmsg", O_RDWR|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
     if (kmsg_fd < 0) {
-        printf("Can't open system log\n");
+        fprintf(stderr, "Can't open system log\n");
         exit(EXIT_FAILURE);
     }
 
@@ -106,7 +106,7 @@ int main(void)
         exit(EXIT_FAILURE);
     }
 
-        /* Change the current working directory */
+    /* Change the current working directory */
     if ((chdir("/")) < 0) {
         log_error("Can't change the current working directory", "", 0, kmsg_fd);
         exit(EXIT_FAILURE);
